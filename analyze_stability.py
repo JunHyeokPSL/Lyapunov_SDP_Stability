@@ -13,11 +13,11 @@ import matplotlib.pyplot as plt
 def cal_Nvariable(scenario):
     
     if scenario == 'droop':
-        Nval = 5
-    elif scenario == 'droop1':
         Nval = 4
+    elif scenario == 'droop1':
+        Nval = 3
     elif scenario == 'secondPI':
-        Nval = 5
+        Nval = 4
     else:
         Nval = 6
         
@@ -120,7 +120,8 @@ def run_timeseries(gen, con, case, scenario):
     
     Ngen, Nval = case['Ngen'], case['Nval']
     Ttotal, Ts = case['Ttotal'], case['Ts']
-    error_mat = case['error'] 
+    error_mat = case['error']
+    load_pattern = case['load_pattern']
     
     Nmat = 1+Ngen*Nval
     Nsample = int(Ttotal/Ts)
@@ -128,8 +129,8 @@ def run_timeseries(gen, con, case, scenario):
     
     X_dot = np.zeros([Nmat,1])
     del_X = np.zeros([Nmat, Nsample+1])
-    U1 = np.zeros([1, Nsample]) # Load Disturbances
-    U2 = np.zeros([Ngen, Nsample]) # Measurement Noises
+    U1 = np.zeros([1, Nsample+1]) # Load Disturbances
+    U2 = np.zeros([Ngen, Nsample+1]) # Measurement Noises
     
     del_X[:,0:1] = X_dot*Ts
     
@@ -153,33 +154,32 @@ def run_timeseries(gen, con, case, scenario):
         # Switch from Droop to the other control
         if i == Ndist+1:
             A = generate_Amat(gen, con, case, scenario)
-    
+            print(f'A matrix change from droop to {scenario}')
         # Disturbance Update
         U2[:,i] = error_mat[:Ngen]
         if i <= 60*1/Ts:
             U1[0,i] = PLinit
             
         elif i>60*1/Ts and i<100*1/Ts:
-            U1[0,i] = 90/Sbase /sumPg
-    
+            U1[0,i] = load_pattern[0] / Sbase /sumPg
+            
         elif i>100*1/Ts and i<140*1/Ts:
-            U1[0,i] = 110/Sbase /sumPg 
+            U1[0,i] = load_pattern[1] / Sbase /sumPg 
     
     
         elif i>140*1/Ts and i<170*1/Ts:
-            U1[0,i] = 140/Sbase /sumPg 
+            U1[0,i] = load_pattern[2] / Sbase /sumPg 
     
         else:
-            U1[0,i] = 120/Sbase /sumPg 
-    
+            U1[0,i] = load_pattern[3] / Sbase /sumPg 
     
         X_dot = np.dot(A, del_X[:,i]) + np.dot(B[:,0:1], U1[:,i]) + np.dot(B[:,1:1+Ngen], U2[:,i])
         del_X[:,i+1] = del_X[:,i]+ Ts*X_dot;  
-        
+    
     end = time.time()
     print('Simulation Time:', end - start, 'secs')
-    
-    return del_X, U1, U2
+    U = np.concatenate((U1.T,U2.T),1).T
+    return del_X, U
 
 def check_symmetric(matrix):
     n = matrix.shape[0]
@@ -193,6 +193,8 @@ def check_symmetric(matrix):
         print("Matrix is symmetric")  # optional, can remove if not needed
 
 def draw_graph(Y, gen, case, scenario):
+    
+    start = time.time()
     
     Sbase = gen['Sbase']
     Ngen = case['Ngen']
@@ -232,7 +234,80 @@ def draw_graph(Y, gen, case, scenario):
     ax2.legend(loc='best', fontsize = 10)
     ax2.set_title('Active Power Data')
     plt.show()
+    
+    end = time.time()
+    print('Lyapunov Simulation Time:', end - start, 'secs')
+    
+def draw_lyapunov(matrix_set, case):
+    
+    print("Print_lyapunov_function for timeseries")
+    X = matrix_set['X']
+    P = matrix_set['P']
+    A_droop = matrix_set['A_droop']
+    A_mat = matrix_set['A']
+    
+    B = matrix_set['B']
+    U = matrix_set['U']
+    
+    Ts = case['Ts']
+    input_flag = case['input_flag']
+
+    nSample = X.shape[1]-1
+    x = np.arange(nSample)*Ts 
+    V = np.zeros(nSample) 
+    V_dot = np.zeros(nSample)
+    V_input_dot = np.zeros(nSample)
+    Ndist = int(nSample/10)
+    
+    A = A_droop
+    for i in range(nSample):
+        
+        if i == Ndist+1:
+            print("Change A matrix from droop to the other set")
+            A = A_mat
+    
+        tempV = np.dot(X[:,i].T, P)
+        V[i] = np.dot(tempV, X[:,i])
+        
+        temp_AP = np.dot(A.T, P)
+        temp_PA = np.dot(P, A)
+        temp_APPA = temp_AP + temp_PA
+        
+        temp_Vdot = np.dot(X[:,i].T, temp_APPA)
+        
+        V_dot[i] = np.dot(temp_Vdot, X[:,i]) 
+        
+        temp_PB = np.dot(P, B)
+        temp_xPB = np.dot(X[:,i].T, temp_PB)
+        V_input_dot[i] = 2*np.dot(temp_xPB, U[:,i])
+    
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
+    
+    print("Draw Lyapunov function")
+    ax1.plot(x, V, label='V(x)', color='black', alpha = 0.7)
             
+    ax1.set_xlabel('Time [s]')
+    ax1.set_ylabel('V(x)')
+    ax1.grid(linewidth = 0.5, alpha = 0.5, linestyle= '--')
+    ax1.legend(loc='best', fontsize = 10)     
+    ax1.set_title('Lyapunov function')
+    
+    print("Draw the derivative of lyapunov function")
+    if input_flag:
+        print("Consider the input matrix")
+        ax2.plot(x, V_dot + V_input_dot, label= 'Vdot', color = 'black')
+
+    else:
+        ax2.plot(x, V_dot, label= 'Vdot', color = 'black')
+    ax2.set_xlabel('Time [s]')
+    ax2.set_ylabel('Vdot')
+    ax2.grid(linewidth = 0.5, alpha = 0.5, linestyle= '--')
+    ax2.legend(loc='best', fontsize = 10)
+    ax2.set_title('Vdot')
+    
+    plt.show()
+    
+    return V, V_dot, V_input_dot
 
 # CODE START
 if __name__ == '__main__':
