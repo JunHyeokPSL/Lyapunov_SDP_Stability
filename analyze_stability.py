@@ -18,6 +18,8 @@ def cal_Nvariable(scenario):
         Nval = 3
     elif scenario == 'secondPI':
         Nval = 4
+    elif scenario == 'nudge':
+        Nval = 5
     else:
         Nval = 6
         
