@@ -9,6 +9,7 @@ import numpy as np
 from scipy import linalg
 import time
 import matplotlib.pyplot as plt
+import logging
 
 def cal_Nvariable(scenario):
     
@@ -125,61 +126,101 @@ def run_timeseries(gen, con, case, scenario):
     error_mat = case['error']
     load_pattern = case['load_pattern']
     
+    Tsamp = case['Tsamp']
+    
+
     Nmat = 1+Ngen*Nval
     Nsample = int(Ttotal/Ts)
-    Ndist = int(0.1 * Nsample) 
-    
+    Ndist = int(20*1/Ts) #int(0.1 * Nsample) 
+
     X_dot = np.zeros([Nmat,1])
     del_X = np.zeros([Nmat, Nsample+1])
     U1 = np.zeros([1, Nsample+1]) # Load Disturbances
     U2 = np.zeros([Ngen, Nsample+1]) # Measurement Noises
     
-    del_X[:,0:1] = X_dot*Ts
+    count = 0
+    Samp_trig = 0
+    Sampling_count = Tsamp/Ts
+    trig = 0
+    count1 = 0
+    trig_time = np.zeros([Nsample + 1])
     
+    del_X[:,0:1] = X_dot*Ts
     #initial operating point
     Winit = -0.002
     del_X[0,0] = Winit
-    sumPg = sum(Pgen)
-    
-    PLinit = Winit*D - Winit/droop*sumPg
+       
     
     A = generate_Amat(gen, con, case, 'droop')
     B = generate_Bmat(gen, con, case)
+
+    isProposed = scenario == 'nudge'    
+    isDroop = scenario == 'droop'
     
+    sumPg = 0
     for i in range(Ngen):
         idx = 1 + i*Nval
-        del_X[idx,0] = -Winit/droop * Pgen[i]
-        del_X[idx+3,0] = Winit
+        Wrefk = Winit + error_mat[i]
+        Pgk = - Wrefk/droop * Pgen[i]
+        del_X[idx,0] = Pgk
+        del_X[idx+3,0] = Wrefk 
+        sumPg += Pgk
+    
+    
+    PLinit = - Winit*D + sumPg
+
 
     for i in range(Nsample):
         
-        # Switch from Droop to the other control
-        if i == Ndist+1:
-            A = generate_Amat(gen, con, case, scenario)
-            print(f'A matrix change from droop to {scenario}')
+        # Switch from Droop to the secPI
+        if not isDroop:
+            if i == Ndist+1:              
+                A = generate_Amat(gen, con, case, 'secondPI')
+                #print(f'A matrix change from droop to {scenario}')
+       
+        if isProposed:
+            # Sampling Count Update
+            count = count + 1
+            if (count > Sampling_count):
+                count = 0
+                if(abs(X_dot[0]*1/Tsamp) < 0.3):
+                    trig = trig + 1
+                    count1 = count1 + 1
+                else:
+                    trig = 0
+                    
+            if i > Ndist+1:
+                if trig <= 5:
+                    A = generate_Amat(gen, con, case, 'secondPI')
+                else:
+                    A = generate_Amat(gen, con, case, 'nudge')
+
+            
         # Disturbance Update
         U2[:,i] = error_mat[:Ngen]
-        if i <= 60*1/Ts:
+        sumPgen = sum(Pgen)
+        
+        if i <= 50*1/Ts:
             U1[0,i] = PLinit
             
-        elif i>60*1/Ts and i<100*1/Ts:
-            U1[0,i] = load_pattern[0] / Sbase /sumPg
+        elif i>50*1/Ts and i<100*1/Ts:
+            U1[0,i] = load_pattern[0] / Sbase /sumPgen
             
         elif i>100*1/Ts and i<140*1/Ts:
-            U1[0,i] = load_pattern[1] / Sbase /sumPg 
+            U1[0,i] = load_pattern[1] / Sbase /sumPgen 
     
     
         elif i>140*1/Ts and i<170*1/Ts:
-            U1[0,i] = load_pattern[2] / Sbase /sumPg 
+            U1[0,i] = load_pattern[2] / Sbase /sumPgen
     
         else:
-            U1[0,i] = load_pattern[3] / Sbase /sumPg 
+            U1[0,i] = load_pattern[3] / Sbase /sumPgen 
     
         X_dot = np.dot(A, del_X[:,i]) + np.dot(B[:,0:1], U1[:,i]) + np.dot(B[:,1:1+Ngen], U2[:,i])
         del_X[:,i+1] = del_X[:,i]+ Ts*X_dot;  
     
     end = time.time()
-    print('Simulation Time:', end - start, 'secs')
+    #print('Simulation Time:', end - start, 'secs')
     U = np.concatenate((U1.T,U2.T),1).T
     return del_X, U
 
@@ -238,7 +279,7 @@ def draw_graph(Y, gen, case, scenario):
     plt.show()
     
     end = time.time()
-    print('Lyapunov Simulation Time:', end - start, 'secs')
+    print('Draw Graph Time:', end - start, 'secs')
     
 def draw_lyapunov(matrix_set, case):
     
@@ -311,8 +352,7 @@ def draw_lyapunov(matrix_set, case):
     
     return V, V_dot, V_input_dot
 
-# CODE START
-if __name__ == '__main__':
+def lyapunov(param):
     
     Ts = 0.5*10**-4
     wpu = 1.0;
@@ -328,24 +368,285 @@ if __name__ == '__main__':
     gen_dict = {'Sbase':150, 'Pgen':Pgen, 'droop':droop,
                 'Tv':Tv, 'Te':Te, 'H':H, 'D':D}
     
+    if len(param) == 1:
+        param = [param]
+        param.append(2.4)
+        
     # Control Parameter
     con_dict = {'kp1': 8,
                 'ki1': 2.5,
                 'ki2': 5,
-                'kc1' : 0.1,
-                'Tl1' : 2.4
+                'kc1' : param[0],
+                'Tl1' : param[1]
                }
- 
-    Ngen = 3 # number of generator
-    Nval = 6 # meaning
+
     Ts = 0.5*10**-4
-    error_mat = np.array([0.001, 0, -0.001])
-    scenario = 'droop'
+    error_mat = np.array([0.0005, 0, -0.0005])
+    
+    scenario = 'nudge'
+    #scenario = 'droop'
+    load_pattern = [90,110,110, 110]
     case_dict = {'Ngen':3, 'Nval': cal_Nvariable(scenario), 'Ts': 0.5*10**-4, 'Ttotal': 200,
-                'wpu':1.0, 'Wmax': 1.02, 'error': error_mat}
+                'wpu':1.0, 'Wmax': 1.02, 'error': error_mat, 'input_flag': True, 'load_pattern': load_pattern}
     
-    
-    A = generate_Amat(gen_dict, con_dict, case_dict, scenario)
+    A = generate_Amat(gen_dict, con_dict, case_dict, 'nudge')
     B = generate_Bmat(gen_dict, con_dict, case_dict)
     
-    X_dot, U1, U2 = run_timeseries(gen_dict, con_dict, case_dict, 'droop')
+    # Optimize
+    n = A.shape[0]
+
+    # Define the LMI variables
+    P = cp.Variable((n,n), symmetric = True)
+    gamma = 1e-6
+    G = np.eye(n)* gamma
+    # Define the constraints for the LMI
+    
+    constraints = [P >> G, A.T @ P + P@A << 0 ]
+    
+    # Define the objective for the LMI optimization problem
+    obj = cp.Minimize(0)
+    #obj = cp.Minimize(cp.trace(P))
+    
+    # Solve the LMI optimization problem
+    prob = cp.Problem(obj, constraints)
+    
+    # Create a SolverOptions object and set the tolerance to 1e-6
+    # Solve the problem with the specified options
+    #prob.solve(solver=cp.MOSEK, verbose=True) #, options=options)
+    prob.solve(solver=cp.MOSEK)
+    
+    cost = np.trace(P.value)
+    
+    return cost
+
+def common_lyapunov(param):
+    
+    Ts = 0.5*10**-4
+    wpu = 1.0;
+    Wmax = 1.02;
+    
+    # Generator Parameter
+    Pgen = np.array([1, 1, 1])
+    droop = 0.05
+    Tv = np.array([0.5, 1.0, 1.0])
+    Te = np.array([0.05, 0.1, 0.1])
+    H = np.array([1.587, 2.5, 2.5])
+    D = 0.01
+    gen_dict = {'Sbase':150, 'Pgen':Pgen, 'droop':droop,
+                'Tv':Tv, 'Te':Te, 'H':H, 'D':D}
+    
+    if len(param) == 1:
+        param = [param]
+        param.append(1.76)
+    # Control Parameter
+    con_dict = {'kp1': 8,
+                'ki1': 2.5,
+                'ki2': 5,
+                'kc1' : param[0],
+                'Tl1' : param[1]
+               }
+
+    Ts = 0.5*10**-4
+    error_mat = np.array([0.0005, 0, -0.0005])
+    
+    scenario = 'nudge'
+    #scenario = 'droop'
+    load_pattern = [90,110,110, 110]
+    case_dict = {'Ngen':3, 'Nval': cal_Nvariable(scenario), 'Ts': 0.5*10**-4, 'Ttotal': 200,
+                'wpu':1.0, 'Wmax': 1.02, 'error': error_mat, 'input_flag': True, 'load_pattern': load_pattern}
+    
+    A = generate_Amat(gen_dict, con_dict, case_dict, 'nudge')
+    A_secPI = generate_Amat(gen_dict, con_dict, case_dict, 'secondPI') 
+    B = generate_Bmat(gen_dict, con_dict, case_dict)
+    
+    # Optimize
+    n = A.shape[0]
+
+    # Define the LMI variables
+    P = cp.Variable((n,n), symmetric = True)
+    gamma = 1e-6
+    G = np.eye(n)* gamma
+    # Define the constraints for the LMI
+    
+    constraints = [P >> G, A.T @ P + P@A << 0,
+                   A_secPI.T @ P + P@A_secPI << 0]
+    
+    # Define the objective for the LMI optimization problem
+    obj = cp.Minimize(cp.trace(P))
+    #obj = cp.Minimize(cp.trace(P))
+    
+    # Solve the LMI optimization problem
+    prob = cp.Problem(obj, constraints)
+    
+    # Create a SolverOptions object and set the tolerance to 1e-6
+    # Solve the problem with the specified options
+    #prob.solve(solver=cp.MOSEK, verbose=True) #, options=options)
+    
+    try:
+        prob.solve(solver=cp.MOSEK)
+        cost = np.trace(P.value)
+        
+    except BaseException as e:
+        logging.exception("Optimize Failed")
+        cost = 10000000
+        #print(f"Problem Cannot solved, check with {param}")
+    return cost
+
+
+def run_time_minimize(param):
+    
+    Ts = 2.0*10**-4 #0.5*10**-4
+    wpu = 1.0;
+    Wmax = 1.02;
+    
+    # Generator Parameter
+    Pgen = np.array([1, 1, 1])
+    droop = 0.05
+    Tv = np.array([0.5, 1.0, 1.0])
+    Te = np.array([0.05, 0.1, 0.1])
+    H = np.array([1.587, 2.5, 2.5])
+    D = 0.01
+    gen_dict = {'Sbase':150, 'Pgen':Pgen, 'droop':droop,
+                'Tv':Tv, 'Te':Te, 'H':H, 'D':D}
+    
+    if len(param) == 1:
+        param = [param]
+        param.append(1.76)
+    # Control Parameter
+    con_dict = {'kp1': 6.7,
+                'ki1': 3.2,
+                'ki2': 5,
+                'kc1' : param[0],
+                'Tl1' : param[1]
+               }
+
+    Ts = 0.5*10**-4
+    error_mat = np.array([0.0005, 0, -0.0005])
+    
+    scenario = 'nudge'
+    #scenario = 'droop'
+    load_pattern = [100,80,80, 90]
+    case_dict = {'Ngen':3, 'Nval': cal_Nvariable(scenario), 'Ts': 0.5*10**-4, 'Ttotal': 100, 'Tsamp':1/1000,
+                'wpu':1.0, 'Wmax': 1.02, 'error': error_mat, 'input_flag': True, 'load_pattern': load_pattern}
+    
+
+    X_nudge, U = run_timeseries(gen_dict, con_dict, case_dict, 'nudge')
+    load_pattern = case_dict['load_pattern']
+    
+    Ngen = case_dict['Ngen']
+    Nval = case_dict['Nval']
+    
+    Ttotal, Ts = case_dict['Ttotal'], case_dict['Ts']
+
+    load_pattern = case_dict['load_pattern']
+    
+    Nsample = int(Ttotal/Ts)
+    Ndist = int(20*1/Ts) #int(0.1 * Nsample)
+    sum_cost = 0
+    try:
+        # for i in range(Ngen):
+        #     idx = 1+i*Nval
+        #     sum_cost += np.sum(abs(X_nudge[idx, Ndist+2:]))*10
+        
+        if Ngen == 2:
+            idx =  1+0*Nval
+            idy =  1+1*Nval
+            
+            dif_gen = np.sum(abs(X_nudge[idx, Ndist+2:] - X_nudge[idy, Ndist+2:]))
+            sum_cost += dif_gen
+            
+        elif Ngen == 3:
+            idx =  1+0*Nval
+            idy =  1+1*Nval
+            idz =  1+2*Nval
+            
+            dif_gen1 = np.sum(abs(X_nudge[idx, Ndist+2:] - X_nudge[idy, Ndist+2:]))
+            dif_gen2 = np.sum(abs(X_nudge[idx, Ndist+2:] - X_nudge[idy, Ndist+2:]))
+            sum_cost += (dif_gen1 + dif_gen2)/2
+            
+        sum_cost += np.sum(abs(X_nudge[0,Ndist+2:])) * 20
+
+    except BaseException as e:
+        logging.exception("Optimize Failed")
+        cost = 10000000
+    print('.', end='')
+    
+    return sum_cost 
+
+# CODE START
+if __name__ == '__main__':
+    
+    param = np.array([0.1, 2.4])
+    Ts = 0.5*10**-4
+    wpu = 1.0;
+    Wmax = 1.02;
+    
+    # Generator Parameter
+    Pgen = np.array([1, 1, 1])
+    droop = 0.05
+    Tv = np.array([0.5, 1.0, 1.0])
+    Te = np.array([0.05, 0.1, 0.1])
+    H = np.array([1.587, 2.5, 2.5])
+    D = 0.01
+    gen_dict = {'Sbase':150, 'Pgen':Pgen, 'droop':droop,
+                'Tv':Tv, 'Te':Te, 'H':H, 'D':D}
+    
+    if len(param) == 1:
+        param = [param]
+        param.append(1.76)
+    # Control Parameter
+    con_dict = {'kp1': 6.7,
+                'ki1': 3.2,
+                'ki2': 5.0,
+                'kc1' : param[0],
+                'Tl1' : param[1]
+               }
+
+    Ts = 0.5*10**-4
+    error_mat = np.array([0.0005, 0, -0.0005])
+    
+    scenario = 'nudge'
+    #scenario = 'droop'
+    load_pattern = [90,110,110, 110]
+    case_dict = {'Ngen':3, 'Nval': cal_Nvariable(scenario), 'Ts': 0.5*10**-4, 'Ttotal': 80,
+                'wpu':1.0, 'Wmax': 1.02, 'error': error_mat, 'input_flag': True, 'load_pattern': load_pattern,
+                'Tsamp':1/1000, 
+                }
+    
+    A = generate_Amat(gen_dict, con_dict, case_dict, 'nudge')
+    A_secPI = generate_Amat(gen_dict, con_dict, case_dict, 'secondPI') 
+    B = generate_Bmat(gen_dict, con_dict, case_dict)
+    
+    # Optimize
+    n = A.shape[0]
+
+    # Define the LMI variables
+    P = cp.Variable((n,n), symmetric = True)
+    gamma = 1e-4
+    G = np.eye(n)* gamma
+    # Define the constraints for the LMI
+    
+    constraints = [P >> G, A.T @ P + P@A << 0,
+                   A_secPI.T @ P + P@A_secPI << 0]
+    
+    # Define the objective for the LMI optimization problem
+    obj = cp.Minimize(0)
+    #obj = cp.Minimize(cp.trace(P))
+    
+    # Solve the LMI optimization problem
+    prob = cp.Problem(obj, constraints)
+    
+    # Create a SolverOptions object and set the tolerance to 1e-6
+    # Solve the problem with the specified options
+    #prob.solve(solver=cp.MOSEK, verbose=True) #, options=options)
+    try:
+        prob.solve(solver=cp.MOSEK)
+        cost = np.trace(P.value)
+    except:
+        cost = 100000
+        #print(f"Problem Cannot solved, check with {param}")
+
+
+    
+    
+    
